@@ -8,7 +8,7 @@ from typing import Any
 import csv
 import json
 
-from .registry import ContractError, identifier
+from .registry import ContractError, FormatSpec, MAPPING_FIELDS, format_version_name, identifier, valid_mapping
 
 
 @dataclass(frozen=True)
@@ -16,6 +16,8 @@ class BatchEnvelope:
     source: str
     batch_id: str
     format: str
+    format_version: str
+    spec: FormatSpec
     rows: tuple[dict[str, Any], ...]
     payload_hash: str
     declared_count: int
@@ -49,16 +51,8 @@ def manifest_value(path: Path) -> dict[str, Any]:
     return value
 
 
-def valid_mapping(mapping: Any) -> dict[str, str]:
-    required = ("indicator", "period", "value", "unit")
-    if not isinstance(mapping, dict) or set(mapping) != set(required):
-        raise ContractError("column_mapping", "columns must map indicator, period, value and unit")
-    for key, column in mapping.items():
-        if not isinstance(column, str) or not column.strip():
-            raise ContractError("column_mapping", f"empty mapping for {key}")
-    if len(set(mapping.values())) != len(mapping):
-        raise ContractError("column_mapping", "one column cannot serve two fields")
-    return mapping
+def manifest_source(manifest_path: str | Path) -> str:
+    return identifier(manifest_value(Path(manifest_path)).get("source"), "source")
 
 
 def parse_json_rows(data: bytes) -> list[dict[str, Any]]:
@@ -92,7 +86,23 @@ def parse_csv_rows(data: bytes) -> list[dict[str, Any]]:
     return rows
 
 
-def load_batch(manifest_path: str | Path) -> BatchEnvelope:
+def confirm_format(manifest: dict[str, Any], formats: dict[str, FormatSpec], source: str) -> FormatSpec:
+    marker = manifest.get("format_version")
+    if not isinstance(marker, str) or not marker.strip():
+        raise ContractError("format_version_missing",
+                            "manifest must name the delivery format version; it is never inferred")
+    spec = formats.get(marker.strip())
+    if spec is None:
+        raise ContractError("format_version_unknown",
+                            f"format version {marker!r} is not declared for source {source}")
+    declared = manifest.get("columns")
+    if declared is not None and valid_mapping(declared) != spec.columns:
+        raise ContractError("format_version_conflict",
+                            "manifest columns differ from the declared format version")
+    return spec
+
+
+def load_batch(manifest_path: str | Path, formats: dict[str, FormatSpec]) -> BatchEnvelope:
     path = Path(manifest_path)
     manifest = manifest_value(path)
     source = identifier(manifest.get("source"), "source")
@@ -100,12 +110,13 @@ def load_batch(manifest_path: str | Path) -> BatchEnvelope:
     format_name = manifest.get("format")
     if format_name not in {"csv", "json"}:
         raise ContractError("payload_format", "format must be csv or json")
+    spec = confirm_format(manifest, formats, source)
+    mapping = spec.columns
     filename = manifest.get("payload")
     if not isinstance(filename, str) or not filename or Path(filename).is_absolute() or Path(filename).name != filename:
         raise ContractError("payload_path", "payload must be a sibling filename")
     if filename == path.name:
         raise ContractError("payload_path", "payload cannot be the manifest")
-    mapping = valid_mapping(manifest.get("columns"))
     declared_count = manifest.get("row_count")
     if type(declared_count) is not int or declared_count < 1 or declared_count > 100_000:
         raise ContractError("row_count", "row_count must be 1-100000")
@@ -127,33 +138,37 @@ def load_batch(manifest_path: str | Path) -> BatchEnvelope:
         normalized = {key: row[column] for key, column in mapping.items()}
         normalized["line"] = number
         rows.append(normalized)
-    return BatchEnvelope(source, batch_id, format_name, tuple(rows), digest, declared_count, metadata)
+    return BatchEnvelope(source, batch_id, format_name, spec.version, spec, tuple(rows),
+                         digest, declared_count, metadata)
 
 
 def write_manifest(directory: str | Path, *, source: str, batch_id: str,
                    rows: list[dict[str, Any]], format_name: str = "json",
+                   format_version: str, columns: dict[str, str] | None = None,
                    metadata: dict[str, Any] | None = None) -> Path:
     root = Path(directory)
     root.mkdir(parents=True, exist_ok=True)
     identifier(source, "source")
     identifier(batch_id, "batch_id")
+    format_version_name(format_version)
     if format_name not in {"csv", "json"}:
         raise ContractError("payload_format", "format must be csv or json")
     if not rows:
         raise ContractError("empty_rows", "at least one row is required")
+    mapping = dict(valid_mapping(columns)) if columns is not None else {key: key for key in MAPPING_FIELDS}
     filename = f"{batch_id}.{format_name}"
     payload_path = root / filename
     if format_name == "json":
         payload = canonical_bytes(rows)
     else:
         stream = StringIO(newline="")
-        writer = csv.DictWriter(stream, fieldnames=["indicator", "period", "value", "unit"], lineterminator="\n")
+        writer = csv.DictWriter(stream, fieldnames=[mapping[key] for key in MAPPING_FIELDS], lineterminator="\n")
         writer.writeheader()
         writer.writerows(rows)
         payload = stream.getvalue().encode("utf-8")
     payload_path.write_bytes(payload)
     manifest = {"source": source, "batch_id": batch_id, "format": format_name,
-                "payload": filename, "columns": {key: key for key in ("indicator", "period", "value", "unit")},
+                "format_version": format_version, "payload": filename, "columns": mapping,
                 "row_count": len(rows), "sha256": sha256(payload).hexdigest(), "metadata": metadata or {}}
     manifest_path = root / f"{batch_id}.manifest.json"
     manifest_path.write_bytes(canonical_bytes(manifest))

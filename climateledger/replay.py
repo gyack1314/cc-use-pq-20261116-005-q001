@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .intake import load_batch
+from .intake import load_batch, manifest_source
 from .normalize import Normalizer
 from .quality import QualityGate
 from .registry import ContractError, Registry
@@ -17,14 +17,15 @@ class ReplayInspector:
         self.quality = QualityGate(registry, store)
 
     def compare_manifest(self, manifest_path: str | Path, batch_id: int) -> dict[str, Any]:
-        envelope = load_batch(manifest_path)
         batch = self.store.batch(batch_id)
+        source = self.registry.source(manifest_source(manifest_path))
+        envelope = load_batch(manifest_path, self.registry.format_map(source.key))
         identity = envelope.source == batch["source"] and envelope.batch_id == batch["external_id"]
         bytes_match = envelope.payload_hash == batch["payload_hash"]
         if not identity:
             raise ContractError("replay_identity", "manifest source or external id differs from batch")
-        source = self.registry.source(envelope.source)
-        measurements, rejected = self.normalizer.batch(source, envelope.rows)
+        version_match = envelope.format_version == batch["format_version"]
+        measurements, rejected = self.normalizer.batch(source, envelope.rows, envelope.spec)
         expected = self.store.measurements(batch_id)
         comparison = []
         for item in measurements:
@@ -35,15 +36,20 @@ class ReplayInspector:
                                "stored_value": old["value"] if old else None,
                                "replayed_value": item.value})
         return {"batch_id": batch_id, "identity_match": identity, "payload_hash_match": bytes_match,
+                "format_version": batch["format_version"],
+                "replayed_format_version": envelope.format_version,
+                "format_version_match": version_match,
                 "stored_rows": len(expected), "replayed_rows": len(measurements),
                 "rejected_rows": rejected, "row_comparison": comparison,
-                "reproducible": bytes_match and len(expected) == len(measurements) and
+                "reproducible": bytes_match and version_match and len(expected) == len(measurements) and
                                 all(row["matches"] for row in comparison)}
 
     def manifest_receipt(self, manifest_path: str | Path) -> dict[str, Any]:
-        envelope = load_batch(manifest_path)
+        source = self.registry.source(manifest_source(manifest_path))
+        envelope = load_batch(manifest_path, self.registry.format_map(source.key))
         existing = self.store.latest_batch(envelope.source, envelope.batch_id)
         return {"source": envelope.source, "external_id": envelope.batch_id,
+                "format_version": envelope.format_version,
                 "payload_hash": envelope.payload_hash, "declared_count": envelope.declared_count,
                 "latest_batch": existing["id"] if existing else None,
                 "same_payload": existing["payload_hash"] == envelope.payload_hash if existing else None,

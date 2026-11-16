@@ -56,6 +56,7 @@ class ReviewQueue:
             raise ContractError("unknown_batch", "no batch history for source and external id")
         return [{"batch_id": batch["id"], "revision": batch["revision"],
                  "status": batch["status"], "payload_hash": batch["payload_hash"],
+                 "format_version": batch["format_version"],
                  "published_version": batch["published_version"],
                  "received_at": batch["received_at"], "approved_at": batch["approved_at"]}
                 for batch in rows]
@@ -81,6 +82,7 @@ class ReceiptCatalog:
         current = [row for row in entries if row["source"] == source_key]
         return {"source": source.key, "title": source.title, "license": source.license,
                 "active": source.active, "allowed_indicators": list(source.allowed_indicators),
+                "formats": [spec.document() for spec in self.registry.list_formats(source_key)],
                 "batch_count": len(batches), "current_measurements": len(current),
                 "published_batch_ids": sorted({row["batch_id"] for row in current}),
                 "latest_release": latest["version"] if latest else None}
@@ -102,7 +104,8 @@ class ReceiptCatalog:
         batch = self.store.batch(batch_id)
         return {"batch_id": batch_id, "source": batch["source"],
                 "external_id": batch["external_id"], "revision": batch["revision"],
-                "payload_hash": batch["payload_hash"], "received_at": batch["received_at"],
+                "payload_hash": batch["payload_hash"], "format_version": batch["format_version"],
+                "received_at": batch["received_at"],
                 "status": batch["status"], "row_count": batch["row_count"],
                 "accepted_rows": len(self.store.measurements(batch_id)),
                 "published_version": batch["published_version"]}

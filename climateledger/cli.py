@@ -15,7 +15,7 @@ def parser() -> ArgumentParser:
     root = ArgumentParser(prog="climateledger", description="Offline climate indicator batch ledger")
     root.add_argument("--db", default="climateledger.sqlite3", help="SQLite database path")
     commands = root.add_subparsers(dest="command", required=True)
-    for name in ("indicator", "source", "unit"):
+    for name in ("indicator", "source", "unit", "format"):
         sub = commands.add_parser("register-" + name)
         sub.add_argument("contract", help="local UTF-8 JSON contract")
     ingest = commands.add_parser("ingest")
@@ -109,9 +109,13 @@ def demo(workspace: str) -> dict[str, Any]:
         service.register_source({"key": "sample_lab", "title": "Synthetic local lab",
                                  "license": "Local synthetic fixture", "allowed_indicators": ["co2_ppm"]})
         service.register_unit({"indicator": "co2_ppm", "source_unit": "ppb", "factor": "0.001"})
+        service.register_format({"source": "sample_lab", "version": "v1",
+                                 "columns": {"indicator": "indicator", "period": "period",
+                                             "value": "value", "unit": "unit"}})
         rows = [{"indicator": "co2_ppm", "period": "2026-01", "value": "428000", "unit": "ppb"},
                 {"indicator": "co2_ppm", "period": "2026-02", "value": "429000", "unit": "ppb"}]
-        manifest = write_manifest(root, source="sample_lab", batch_id="demo_batch", rows=rows)
+        manifest = write_manifest(root, source="sample_lab", batch_id="demo_batch", rows=rows,
+                                  format_version="v1")
         ingested = service.ingest(manifest)
         batch = ingested["batch"]
         if batch["status"] not in {"accepted", "published"}:
@@ -135,6 +139,8 @@ def execute(args: Namespace) -> Any:
             return service.register_source(read_json(args.contract))
         if args.command == "register-unit":
             return service.register_unit(read_json(args.contract))
+        if args.command == "register-format":
+            return service.register_format(read_json(args.contract))
         if args.command == "ingest":
             return service.ingest(args.manifest)
         if args.command == "approve":

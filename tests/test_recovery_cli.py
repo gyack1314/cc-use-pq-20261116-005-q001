@@ -96,10 +96,14 @@ class CliTests(unittest.TestCase):
             "canonical_unit": "ppm", "cadence": "month", "precision": 2})
         source = self.contract("source.json", {"key": "lab_a", "title": "Synthetic lab A",
             "license": "Local synthetic fixture", "allowed_indicators": ["co2_ppm"]})
+        spec = self.contract("format.json", {"source": "lab_a", "version": "v1",
+            "columns": {"indicator": "indicator", "period": "period", "value": "value", "unit": "unit"}})
         self.assertEqual(self.call("register-indicator", indicator)[0], 0)
         self.assertEqual(self.call("register-source", source)[0], 0)
+        self.assertEqual(self.call("register-format", spec)[0], 0)
         manifest = write_manifest(self.root, source="lab_a", batch_id="cli_batch",
-                                  rows=[{"indicator": "co2_ppm", "period": "2026-01", "value": "428", "unit": "ppm"}])
+                                  rows=[{"indicator": "co2_ppm", "period": "2026-01", "value": "428", "unit": "ppm"}],
+                                  format_version="v1")
         code, ingestion, _ = self.call("ingest", str(manifest))
         self.assertEqual(code, 0)
         batch_id = ingestion["batch"]["id"]

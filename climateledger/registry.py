@@ -15,12 +15,32 @@ class ContractError(ValueError):
 
 
 IDENTIFIER = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
+FORMAT_VERSION = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.\-]{0,31}$")
+MAPPING_FIELDS = ("indicator", "period", "value", "unit")
 
 
 def identifier(value: Any, label: str) -> str:
     if not isinstance(value, str) or not IDENTIFIER.fullmatch(value):
         raise ContractError("invalid_identifier", f"{label} must be a lower-case identifier")
     return value
+
+
+def format_version_name(value: Any) -> str:
+    if not isinstance(value, str) or not FORMAT_VERSION.fullmatch(value):
+        raise ContractError("format_version_name",
+                            "format version must be 1-32 characters of letters, digits, dot, dash or underscore")
+    return value
+
+
+def valid_mapping(mapping: Any) -> dict[str, str]:
+    if not isinstance(mapping, dict) or set(mapping) != set(MAPPING_FIELDS):
+        raise ContractError("column_mapping", "columns must map indicator, period, value and unit")
+    for key, column in mapping.items():
+        if not isinstance(column, str) or not column.strip():
+            raise ContractError("column_mapping", f"empty mapping for {key}")
+    if len(set(mapping.values())) != len(mapping):
+        raise ContractError("column_mapping", "one column cannot serve two fields")
+    return mapping
 
 
 def precise(value: Any, label: str) -> Decimal:
@@ -138,6 +158,43 @@ class UnitRule:
         return precise(raw, "value") * Decimal(self.factor) + Decimal(self.offset)
 
 
+@dataclass(frozen=True)
+class FormatSpec:
+    source: str
+    version: str
+    columns: dict[str, str]
+    units: dict[str, str]
+
+    @classmethod
+    def from_dict(cls, value: dict[str, Any]) -> "FormatSpec":
+        if not isinstance(value, dict):
+            raise ContractError("format_shape", "format version must be an object")
+        source = identifier(value.get("source"), "source")
+        version = format_version_name(value.get("version"))
+        columns = dict(valid_mapping(value.get("columns")))
+        raw_units = value.get("units", {})
+        if not isinstance(raw_units, dict) or len(raw_units) > 64:
+            raise ContractError("format_units", "units must be an object with at most 64 aliases")
+        units = {}
+        for delivered, registered in raw_units.items():
+            if not isinstance(delivered, str) or not delivered.strip() or len(delivered) > 32:
+                raise ContractError("format_units", "delivered unit labels must contain 1-32 characters")
+            if not isinstance(registered, str) or not registered.strip() or len(registered) > 32:
+                raise ContractError("format_units", "registered unit labels must contain 1-32 characters")
+            units[delivered] = registered.strip()
+        return cls(source, version, columns, units)
+
+    def resolve_unit(self, delivered: str) -> str:
+        return self.units.get(delivered, delivered)
+
+    def document(self) -> dict[str, Any]:
+        return {"source": self.source, "version": self.version,
+                "columns": dict(self.columns), "units": dict(self.units)}
+
+    def encode(self) -> str:
+        return json.dumps(self.document(), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
 class Registry:
     def __init__(self, store):
         self.store = store
@@ -161,6 +218,19 @@ class Registry:
             raise ContractError("canonical_conversion", "canonical unit cannot have nonidentity conversion")
         self.store.register_unit(rule)
         return rule
+
+    def register_format(self, value: dict[str, Any]) -> FormatSpec:
+        spec = FormatSpec.from_dict(value)
+        self.source(spec.source)
+        self.store.register_format(spec)
+        return spec
+
+    def list_formats(self, source_key: str) -> list[FormatSpec]:
+        identifier(source_key, "source")
+        return [FormatSpec.from_dict(json.loads(raw)) for raw in self.store.list_format_contracts(source_key)]
+
+    def format_map(self, source_key: str) -> dict[str, FormatSpec]:
+        return {spec.version: spec for spec in self.list_formats(source_key)}
 
     def indicator(self, key: str) -> Indicator:
         identifier(key, "indicator")

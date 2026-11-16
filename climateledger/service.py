@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .intake import load_batch
+from .intake import load_batch, manifest_source
 from .normalize import Normalizer
 from .quality import QualityGate
 from .registry import ContractError, Registry
@@ -55,15 +55,19 @@ class LedgerService:
         return {"indicator": rule.indicator, "source_unit": rule.source_unit,
                 "factor": rule.factor, "offset": rule.offset}
 
+    def register_format(self, contract: dict[str, Any]) -> dict[str, Any]:
+        return self.registry.register_format(contract).document()
+
     def ingest(self, manifest_path: str | Path) -> dict[str, Any]:
-        envelope = load_batch(manifest_path)
+        source = self.registry.source(manifest_source(manifest_path))
+        envelope = load_batch(manifest_path, self.registry.format_map(source.key))
         previous = self.store.latest_batch(envelope.source, envelope.batch_id)
-        if previous and previous["payload_hash"] == envelope.payload_hash:
+        if (previous and previous["payload_hash"] == envelope.payload_hash
+                and previous["format_version"] == envelope.format_version):
             return {"batch": previous, "idempotent": True}
-        source = self.registry.source(envelope.source)
         if not source.active:
             raise ContractError("inactive_source", f"source {source.key} is inactive")
-        measurements, rejected = self.normalizer.batch(source, envelope.rows)
+        measurements, rejected = self.normalizer.batch(source, envelope.rows, envelope.spec)
         assessment = self.quality.assess(source.key, measurements, rejected)
         batch = self.store.insert_batch(envelope, assessment, measurements)
         return {"batch": batch, "idempotent": False}

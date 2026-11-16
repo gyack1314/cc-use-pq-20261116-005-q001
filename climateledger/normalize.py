@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_HALF_EVEN, InvalidOperation
 from typing import Any
 import re
 
-from .registry import ContractError, Registry, Source, precise
+from .registry import ContractError, FormatSpec, Registry, Source, precise
 
 
 MONTH = re.compile(r"^(\d{4})-(0[1-9]|1[0-2])$")
@@ -71,7 +71,7 @@ class Normalizer:
     def __init__(self, registry: Registry):
         self.registry = registry
 
-    def measurement(self, source: Source, row: dict[str, Any]) -> Measurement:
+    def measurement(self, source: Source, row: dict[str, Any], spec: FormatSpec) -> Measurement:
         key = row.get("indicator")
         indicator = self.registry.indicator(key)
         self.registry.require_scope(source, indicator)
@@ -79,7 +79,7 @@ class Normalizer:
         raw_unit = row.get("unit")
         if not isinstance(raw_unit, str) or not raw_unit.strip():
             raise ContractError("unit_type", "unit must be nonempty text")
-        rule = self.registry.conversion(indicator, raw_unit)
+        rule = self.registry.conversion(indicator, spec.resolve_unit(raw_unit))
         raw = precise(row.get("value"), "value")
         converted = rule.convert(raw)
         value = canonical_decimal(converted, indicator.precision)
@@ -89,12 +89,13 @@ class Normalizer:
         return Measurement(source.key, indicator.key, period, value, indicator.canonical_unit,
                            str(raw), raw_unit, line, rule.factor, rule.offset)
 
-    def batch(self, source: Source, rows: tuple[dict[str, Any], ...]) -> tuple[list[Measurement], list[dict[str, Any]]]:
+    def batch(self, source: Source, rows: tuple[dict[str, Any], ...],
+              spec: FormatSpec) -> tuple[list[Measurement], list[dict[str, Any]]]:
         accepted = []
         rejected = []
         for row in rows:
             try:
-                accepted.append(self.measurement(source, row))
+                accepted.append(self.measurement(source, row, spec))
             except ContractError as exc:
                 rejected.append({"line": row.get("line"), "code": exc.code, "detail": exc.detail})
         return accepted, rejected

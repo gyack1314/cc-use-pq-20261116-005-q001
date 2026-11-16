@@ -27,7 +27,8 @@ class AuditInspector:
             raise ContractError("batch_corrupt", "stored line exceeds declared row count")
         findings = Counter(item["code"] for item in batch["findings"])
         return {"batch": {key: batch[key] for key in (
-                    "id", "source", "external_id", "revision", "payload_hash", "status", "row_count")},
+                    "id", "source", "external_id", "revision", "payload_hash", "format_version",
+                    "status", "row_count")},
                 "measurement_count": len(rows), "finding_codes": dict(findings),
                 "event_count": len(events), "events": events,
                 "line_digest": sha256(canonical_bytes(ordered_lines)).hexdigest()}

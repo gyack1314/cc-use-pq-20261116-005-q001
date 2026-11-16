@@ -69,15 +69,16 @@ class IntakeTests(LedgerCase):
     def test_json_round_trip(self):
         rows = self.rows(428, 429)
         path = self.manifest("sample", rows)
-        batch = load_batch(path)
+        batch = load_batch(path, self.formats())
         self.assertEqual(batch.source, "lab_a")
+        self.assertEqual(batch.format_version, "v1")
         self.assertEqual(batch.declared_count, 2)
         self.assertEqual(batch.rows[1]["line"], 2)
         self.assertEqual(batch.rows[1]["value"], "429")
 
     def test_csv_round_trip(self):
         path = self.manifest("sample", self.rows(428, 429), format_name="csv")
-        batch = load_batch(path)
+        batch = load_batch(path, self.formats())
         self.assertEqual(batch.format, "csv")
         self.assertEqual([row["period"] for row in batch.rows], ["2026-01", "2026-02"])
 
@@ -86,7 +87,7 @@ class IntakeTests(LedgerCase):
         payload = path.with_name("sample.json")
         payload.write_text("[]", encoding="utf-8")
         with self.assertRaisesRegex(ContractError, "payload_hash"):
-            load_batch(path)
+            load_batch(path, self.formats())
 
     def test_declared_row_count_mismatch(self):
         path = self.manifest("sample", self.rows(428))
@@ -94,7 +95,7 @@ class IntakeTests(LedgerCase):
         manifest["row_count"] = 2
         path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaisesRegex(ContractError, "row_count"):
-            load_batch(path)
+            load_batch(path, self.formats())
 
     def test_payload_path_cannot_escape(self):
         path = self.manifest("sample", self.rows(428))
@@ -102,15 +103,31 @@ class IntakeTests(LedgerCase):
         manifest["payload"] = "../elsewhere.json"
         path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaisesRegex(ContractError, "payload_path"):
-            load_batch(path)
+            load_batch(path, self.formats())
 
-    def test_column_map_must_cover_fields(self):
+    def test_manifest_columns_must_match_declared_version(self):
         path = self.manifest("sample", self.rows(428))
         manifest = json.loads(path.read_text(encoding="utf-8"))
         del manifest["columns"]["unit"]
         path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaisesRegex(ContractError, "column_mapping"):
-            load_batch(path)
+            load_batch(path, self.formats())
+
+    def test_manifest_columns_conflicting_with_version(self):
+        path = self.manifest("sample", self.rows(428))
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest["columns"]["unit"] = "unit_label"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        with self.assertRaisesRegex(ContractError, "format_version_conflict"):
+            load_batch(path, self.formats())
+
+    def test_manifest_without_columns_uses_declared_version(self):
+        path = self.manifest("sample", self.rows(428))
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        del manifest["columns"]
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        batch = load_batch(path, self.formats())
+        self.assertEqual(batch.rows[0]["unit"], "ppm")
 
     def test_json_rows_must_be_objects(self):
         path = self.manifest("sample", self.rows(428))
@@ -121,7 +138,7 @@ class IntakeTests(LedgerCase):
         manifest["sha256"] = sha256(data).hexdigest()
         path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaisesRegex(ContractError, "row_shape"):
-            load_batch(path)
+            load_batch(path, self.formats())
 
     def test_invalid_csv_header(self):
         path = self.manifest("sample", self.rows(428), format_name="csv")
@@ -132,12 +149,12 @@ class IntakeTests(LedgerCase):
         manifest["sha256"] = sha256(data).hexdigest()
         path.write_text(json.dumps(manifest), encoding="utf-8")
         with self.assertRaisesRegex(ContractError, "csv_header"):
-            load_batch(path)
+            load_batch(path, self.formats())
 
     def test_empty_rows_rejected_before_write(self):
         with self.assertRaisesRegex(ContractError, "empty_rows"):
-            write_manifest(self.root, source="lab_a", batch_id="empty", rows=[])
+            write_manifest(self.root, source="lab_a", batch_id="empty", rows=[], format_version="v1")
 
     def test_metadata_stays_with_envelope(self):
         path = self.manifest("sample", self.rows(428))
-        self.assertEqual(load_batch(path).metadata, {"synthetic": True})
+        self.assertEqual(load_batch(path, self.formats()).metadata, {"synthetic": True})

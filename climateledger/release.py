@@ -45,9 +45,10 @@ class ReleaseBuilder:
     def _manifest(self, batch: dict[str, Any], version: int,
                   entries: list[dict[str, Any]], prior: dict[str, Any] | None) -> dict[str, Any]:
         data_hash = sha256(canonical_bytes(entries)).hexdigest()
-        return {"schema_version": 1, "version": version, "parent_digest": prior["digest"] if prior else None,
+        return {"schema_version": 2, "version": version, "parent_digest": prior["digest"] if prior else None,
                 "batch": {"id": batch["id"], "source": batch["source"], "external_id": batch["external_id"],
                           "revision": batch["revision"], "payload_hash": batch["payload_hash"],
+                          "format_version": batch["format_version"],
                           "row_count": batch["row_count"]},
                 "entry_count": len(entries), "entries_sha256": data_hash,
                 "quality_findings": batch["findings"]}

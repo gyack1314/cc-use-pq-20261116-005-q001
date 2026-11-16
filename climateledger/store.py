@@ -8,7 +8,7 @@ from typing import Any, Iterator
 import json
 import sqlite3
 
-from .registry import ContractError, UnitRule
+from .registry import ContractError, FormatSpec, UnitRule
 from .intake import canonical_bytes
 
 
@@ -19,9 +19,12 @@ CREATE TABLE IF NOT EXISTS sources (key TEXT PRIMARY KEY, contract TEXT NOT NULL
 CREATE TABLE IF NOT EXISTS unit_rules (
     indicator TEXT NOT NULL, source_unit TEXT NOT NULL, factor TEXT NOT NULL, offset TEXT NOT NULL,
     PRIMARY KEY(indicator, source_unit), FOREIGN KEY(indicator) REFERENCES indicators(key));
+CREATE TABLE IF NOT EXISTS source_formats (
+    source TEXT NOT NULL, version TEXT NOT NULL, spec TEXT NOT NULL,
+    PRIMARY KEY(source, version), FOREIGN KEY(source) REFERENCES sources(key));
 CREATE TABLE IF NOT EXISTS batches (
     id INTEGER PRIMARY KEY, source TEXT NOT NULL, external_id TEXT NOT NULL, revision INTEGER NOT NULL,
-    payload_hash TEXT NOT NULL, status TEXT NOT NULL, row_count INTEGER NOT NULL,
+    payload_hash TEXT NOT NULL, format_version TEXT, status TEXT NOT NULL, row_count INTEGER NOT NULL,
     metadata TEXT NOT NULL, findings TEXT NOT NULL, received_at TEXT NOT NULL,
     approved_at TEXT, published_version INTEGER,
     UNIQUE(source, external_id, revision), FOREIGN KEY(source) REFERENCES sources(key));
@@ -58,6 +61,12 @@ class LedgerStore:
         self.connection.execute("PRAGMA busy_timeout=20000")
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.executescript(SCHEMA)
+        self._migrate()
+
+    def _migrate(self) -> None:
+        columns = {row[1] for row in self.connection.execute("PRAGMA table_info(batches)")}
+        if "format_version" not in columns:
+            self.connection.execute("ALTER TABLE batches ADD COLUMN format_version TEXT")
 
     def close(self) -> None:
         self.connection.close()
@@ -129,6 +138,26 @@ class LedgerStore:
                                       (indicator, source_unit)).fetchone()
         return UnitRule(*row) if row else None
 
+    def register_format(self, spec: FormatSpec) -> None:
+        with self.transaction():
+            old = self.get_format(spec.source, spec.version)
+            if old is not None and old != spec:
+                raise ContractError("format_immutable",
+                                    f"format {spec.source}:{spec.version} already has a different spec")
+            if old is None:
+                self.connection.execute("INSERT INTO source_formats VALUES(?,?,?)",
+                                        (spec.source, spec.version, spec.encode()))
+                self.event("register_format", f"{spec.source}:{spec.version}", spec.document())
+
+    def get_format(self, source: str, version: str) -> FormatSpec | None:
+        row = self.connection.execute("SELECT spec FROM source_formats WHERE source=? AND version=?",
+                                      (source, version)).fetchone()
+        return FormatSpec.from_dict(json.loads(row[0])) if row else None
+
+    def list_format_contracts(self, source: str) -> list[str]:
+        return [row[0] for row in self.connection.execute(
+            "SELECT spec FROM source_formats WHERE source=? ORDER BY version", (source,))]
+
     def latest_batch(self, source: str, external_id: str) -> dict[str, Any] | None:
         row = self.connection.execute("SELECT * FROM batches WHERE source=? AND external_id=? ORDER BY revision DESC LIMIT 1",
                                       (source, external_id)).fetchone()
@@ -156,14 +185,15 @@ class LedgerStore:
     def insert_batch(self, envelope, assessment, measurements) -> dict[str, Any]:
         with self.transaction():
             old = self.latest_batch(envelope.source, envelope.batch_id)
-            if old and old["payload_hash"] == envelope.payload_hash:
+            if (old and old["payload_hash"] == envelope.payload_hash
+                    and old["format_version"] == envelope.format_version):
                 return old
             revision = 1 if old is None else old["revision"] + 1
             cursor = self.connection.execute(
-                "INSERT INTO batches(source,external_id,revision,payload_hash,status,row_count,metadata,findings,received_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?)",
+                "INSERT INTO batches(source,external_id,revision,payload_hash,format_version,status,row_count,"
+                "metadata,findings,received_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
                 (envelope.source, envelope.batch_id, revision, envelope.payload_hash,
-                 assessment.status, envelope.declared_count,
+                 envelope.format_version, assessment.status, envelope.declared_count,
                  canonical_bytes(envelope.metadata).decode(),
                  canonical_bytes([item.document() for item in assessment.findings]).decode(), utc_now()))
             batch_id = cursor.lastrowid
@@ -173,7 +203,8 @@ class LedgerStore:
                   item.raw_value, item.raw_unit, item.rule_factor, item.rule_offset)
                  for item in measurements])
             self.event("ingest", f"batch:{batch_id}", {"status": assessment.status,
-                       "revision": revision, "payload_hash": envelope.payload_hash})
+                       "revision": revision, "payload_hash": envelope.payload_hash,
+                       "format_version": envelope.format_version})
             return self.batch(batch_id)
 
     def approve(self, batch_id: int, expected_revision: int) -> dict[str, Any]:
